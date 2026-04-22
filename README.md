@@ -1,23 +1,35 @@
 # Missive → OneNote Integration
 
-A Cloudflare Worker that adds a **sidebar app** to Missive, letting you save any email directly into a Microsoft OneNote notebook — with full HTML formatting preserved, and memory of your last-used notebook/section.
+A Cloudflare Worker that adds a **sidebar app** and **quick action** to Missive, letting you save any email directly into a Microsoft OneNote notebook — with full HTML formatting preserved, and memory of your last-used notebook/section.
+
+Works on **desktop and mobile (iOS/Android)**.
 
 ---
 
 ## How it works
 
 1. The Worker serves a sidebar UI that Missive loads inside an iFrame.
-2. When you open an email in Missive, the sidebar reads the subject, sender, recipients, date, and full HTML body using the Missive JS SDK (no API key needed on the Worker side).
-3. You pick a OneNote **Notebook** and **Section** (dropdowns auto-populate from your account). Your last choice is remembered.
-4. Click **Save** — the Worker creates a OneNote page via Microsoft Graph API, preserving all formatting.
+2. When you open an email in Missive, the sidebar reads the subject, sender, recipients, date, and full HTML body using the Missive JS SDK.
+3. A **quick action** ("Save to OneNote") also appears in the conversation context menu — tap it to open the sidebar instantly.
+4. You pick a OneNote **Notebook** and **Section** (dropdowns auto-populate from your account). Your last choice is remembered.
+5. Click **Save** — the Worker creates a OneNote page via Microsoft Graph API, preserving all formatting.
+
+---
+
+## Fixes applied (vs. original)
+
+| # | Issue | Root cause | Fix |
+|---|-------|-----------|-----|
+| 1 | **Mobile/iOS blank screen** | `frame-ancestors` CSP header blocked the iframe on iOS (Missive iOS loads from `localhost`) | Removed `frame-ancestors` directive entirely per [Missive iOS docs](https://missiveapp.com/docs/developers/ui-iframe-integrations#ios-compatibility) |
+| 2 | **Quick action missing** | `Missive.setActions()` was never called | Added `setActions()` registering a "Save to OneNote" action in the `conversation` context |
+| 3 | **SDK URL outdated** | Used deprecated `https://missiveapp.com/include/api.js` | Updated to `https://integrations.missiveapp.com/missive.js` |
+| 4 | **iOS OAuth popup blocked** | `window.open()` popups are blocked inside iframes on iOS | Replaced with `Missive.initiateCallback()` — the official iOS-compatible OAuth flow; also switched session storage from `sessionStorage` to `Missive.storeSet/storeGet` |
 
 ---
 
 ## Setup
 
 ### 1. Azure App Registration (Microsoft)
-
-You need a Microsoft Azure app to authenticate users via OAuth.
 
 1. Go to [portal.azure.com](https://portal.azure.com) → **Azure Active Directory** → **App registrations** → **New registration**
 2. Name: `Missive OneNote Integration` (or anything you like)
@@ -77,6 +89,8 @@ Update the Azure redirect URI to your Worker URL:
 2. Type: **Sidebar app (iFrame)**
 3. URL: `https://missive-onenote.YOUR-ACCOUNT.workers.dev/`
 4. Name: `Save to OneNote`
+
+Once added, the **quick action** ("Save to OneNote") will automatically appear in conversation context menus on both desktop and mobile.
 
 ---
 

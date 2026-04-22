@@ -4,7 +4,8 @@
  *
  * Features:
  *  - Missive sidebar app (iFrame) using Missive JS SDK
- *  - Microsoft OAuth 2.0 via popup (works inside iFrames)
+ *  - Microsoft OAuth 2.0 via Missive.initiateCallback (works on iOS + desktop)
+ *  - Quick action integration via Missive.setActions (visible in context menus)
  *  - Fetches email content client-side via Missive JS API
  *  - Creates OneNote pages via Microsoft Graph API
  *  - Preserves full email HTML formatting
@@ -16,6 +17,15 @@
  *  - MICROSOFT_CLIENT_SECRET
  *
  * KV binding: ONENOTE_KV (set in wrangler.toml)
+ *
+ * Fixes applied:
+ *  1. Mobile/iOS blank screen — removed frame-ancestors from CSP (Missive iOS
+ *     loads from localhost; any explicit frame-ancestors list blocks it)
+ *  2. Quick action missing — added Missive.setActions() to register a
+ *     "Save to OneNote" action in conversation context menus
+ *  3. SDK URL — updated to current https://integrations.missiveapp.com/missive.js
+ *  4. iOS OAuth — replaced window.open() popup with Missive.initiateCallback()
+ *     which is iOS-compatible and designed for iframe OAuth flows
  */
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -273,6 +283,10 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
       border-color: #7719AA;
       box-shadow: 0 2px 8px rgba(119,25,170,0.15);
     }
+    .connect-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
 
     /* ── Divider ── */
     hr { border: none; border-top: 1px solid #f0f0f0; margin: 14px 0; }
@@ -326,7 +340,7 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
   <!-- Auth screen (shown when not connected) -->
   <div id="connectScreen" class="connect-screen" style="display:none">
     <p>Connect your Microsoft account to save Missive emails directly into OneNote.</p>
-    <button class="connect-btn" onclick="openAuthPopup()">
+    <button class="connect-btn" id="connectBtn" onclick="openAuthFlow()">
       <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect width="8.5" height="8.5" fill="#F25022"/><rect x="9.5" width="8.5" height="8.5" fill="#7FBA00"/><rect y="9.5" width="8.5" height="8.5" fill="#00A4EF"/><rect x="9.5" y="9.5" width="8.5" height="8.5" fill="#FFB900"/></svg>
       Connect Microsoft Account
     </button>
@@ -372,15 +386,15 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
     </div>
   </div>
 
-  <!-- Missive SDK -->
-  <script src="https://missiveapp.com/include/api.js"></script>
+  <!-- FIX #3: Updated SDK URL to current integrations domain -->
+  <script src="https://integrations.missiveapp.com/missive.js"></script>
 
   <script>
     // ── State ──────────────────────────────────────────────────────────────────
     const WORKER_URL = '${workerUrl}';
     const LAST_LOC   = ${JSON.stringify(lastLocation)};
 
-    let sessionId    = sessionStorage.getItem('mn_session') || null;
+    let sessionId    = null;
     let currentEmail = null; // { subject, fromName, fromEmail, toFields, ccFields, date, bodyHtml }
     let notebooks    = [];
     let sections     = [];
@@ -388,6 +402,9 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
 
     // ── Boot ───────────────────────────────────────────────────────────────────
     async function boot() {
+      // FIX #4: Use Missive.storeGet instead of sessionStorage for iOS compatibility
+      sessionId = await Missive.storeGet('mn_session');
+
       if (sessionId) {
         // Verify token is still valid
         try {
@@ -397,14 +414,16 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
             msUserId = me.id;
             showApp();
             loadNotebooks();
+            setupQuickAction();
             return;
           }
         } catch(e) {}
         // Token invalid — clear session
         sessionId = null;
-        sessionStorage.removeItem('mn_session');
+        await Missive.storeSet('mn_session', null);
       }
       showConnect();
+      setupQuickAction();
     }
 
     function showConnect() {
@@ -417,20 +436,20 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
       document.getElementById('appScreen').style.display = '';
     }
 
-    // ── Auth popup ─────────────────────────────────────────────────────────────
-    function openAuthPopup() {
-      const popup = window.open(
-        WORKER_URL + '/auth/login',
-        'msAuth',
-        'width=520,height=640,left=100,top=100,scrollbars=yes'
-      );
-      window.addEventListener('message', async function onMsg(evt) {
-        if (evt.data?.type !== 'ms_auth_success') return;
-        window.removeEventListener('message', onMsg);
-        if (evt.data.sessionId) {
-          sessionId = evt.data.sessionId;
-          sessionStorage.setItem('mn_session', sessionId);
-          try { popup.close(); } catch(e) {}
+    // ── FIX #4: Auth via Missive.initiateCallback (iOS-compatible, no popup) ──
+    async function openAuthFlow() {
+      const btn = document.getElementById('connectBtn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner"></span>Connecting…';
+
+      try {
+        // Missive opens the auth URL in a new tab, adds a redirectTo param,
+        // and resolves with whatever query params our /auth/callback redirects to.
+        const result = await Missive.initiateCallback(WORKER_URL + '/auth/login');
+
+        if (result && result.session_id) {
+          sessionId = result.session_id;
+          await Missive.storeSet('mn_session', sessionId);
           const r = await apiFetch('/api/me');
           if (r.ok) {
             const me = await r.json();
@@ -438,8 +457,17 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
           }
           showApp();
           loadNotebooks();
+          setupQuickAction();
+        } else {
+          showStatus('error', 'Authentication failed. Please try again.');
         }
-      });
+      } catch(e) {
+        console.error('Auth error:', e);
+        showStatus('error', 'Authentication was cancelled or failed.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = \`<svg width="18" height="18" viewBox="0 0 18 18" fill="none"><rect width="8.5" height="8.5" fill="#F25022"/><rect x="9.5" width="8.5" height="8.5" fill="#7FBA00"/><rect y="9.5" width="8.5" height="8.5" fill="#00A4EF"/><rect x="9.5" y="9.5" width="8.5" height="8.5" fill="#FFB900"/></svg>Connect Microsoft Account\`;
+      }
     }
 
     // ── Disconnect ─────────────────────────────────────────────────────────────
@@ -447,7 +475,7 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
       if (!confirm('Disconnect your Microsoft account?')) return;
       await apiFetch('/auth/disconnect', { method: 'POST' });
       sessionId = null;
-      sessionStorage.removeItem('mn_session');
+      await Missive.storeSet('mn_session', null);
       currentEmail = null;
       showConnect();
     }
@@ -462,6 +490,23 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
           ...(opts.headers || {}),
         },
       });
+    }
+
+    // ── FIX #2: Quick Action via Missive.setActions ────────────────────────────
+    // This registers the "Save to OneNote" action in Missive's conversation
+    // context menus, making it visible in the quick action configuration.
+    function setupQuickAction() {
+      Missive.setActions([
+        {
+          label: 'Save to OneNote',
+          emoji: ':spiral_notepad:',
+          contexts: ['conversation'],
+          callback: async ({ conversations }) => {
+            // Open the sidebar so the user can see the save UI
+            Missive.openSelf();
+          },
+        },
+      ]);
     }
 
     // ── Missive JS SDK ─────────────────────────────────────────────────────────
@@ -688,49 +733,16 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
 </html>`;
 }
 
-// ─── HTML: Auth Popup Close Page ──────────────────────────────────────────────
+// ─── HTML: Auth Callback Redirect Page (for Missive.initiateCallback) ─────────
+// After OAuth completes, we redirect to the Missive-provided redirectTo URL
+// with session_id as a query param. Missive.initiateCallback resolves with
+// those params, so the iframe receives the session_id without any popup.
 
-function renderAuthSuccess(sessionId) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Connected!</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; margin: 0; background: #faf8ff;
-    }
-    .box {
-      text-align: center; padding: 40px;
-      background: #fff; border-radius: 12px;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-      max-width: 320px;
-    }
-    .check { font-size: 48px; margin-bottom: 16px; }
-    h2 { color: #7719AA; font-size: 20px; margin-bottom: 8px; }
-    p  { color: #666; font-size: 13px; }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <div class="check">✓</div>
-    <h2>Connected!</h2>
-    <p>You can close this window.</p>
-  </div>
-  <script>
-    // Notify the parent sidebar
-    if (window.opener) {
-      window.opener.postMessage(
-        { type: 'ms_auth_success', sessionId: ${JSON.stringify(sessionId)} },
-        '*'
-      );
-      setTimeout(() => window.close(), 1500);
-    }
-  </script>
-</body>
-</html>`;
+function renderAuthCallback(redirectTo, sessionId) {
+  // Build the final redirect URL with session_id appended
+  const finalUrl = new URL(redirectTo);
+  finalUrl.searchParams.set('session_id', sessionId);
+  return Response.redirect(finalUrl.toString(), 302);
 }
 
 // ─── OneNote Page Builder ─────────────────────────────────────────────────────
@@ -784,17 +796,17 @@ function buildOneNotePage(email) {
     </h1>
 
     <!-- Metadata table -->
-    <table style="border-collapse:collapse;width:100%;margin-bottom:16px;font-size:13px;">
+    <table style="border-collapse:collapse;margin-bottom:16px;font-size:13px;width:100%;">
       <tr>
-        <td style="padding:3px 10px 3px 0;color:#777;font-weight:700;white-space:nowrap;width:50px;">From</td>
+        <td style="padding:3px 10px 3px 0;color:#777;font-weight:700;white-space:nowrap;">From</td>
         <td style="padding:3px 0;">${fromStr}</td>
       </tr>
       ${toStr ? `<tr>
-        <td style="padding:3px 10px 3px 0;color:#777;font-weight:700;">To</td>
+        <td style="padding:3px 10px 3px 0;color:#777;font-weight:700;white-space:nowrap;">To</td>
         <td style="padding:3px 0;">${xmlEsc(toStr)}</td>
       </tr>` : ''}
       ${ccStr ? `<tr>
-        <td style="padding:3px 10px 3px 0;color:#777;font-weight:700;">CC</td>
+        <td style="padding:3px 10px 3px 0;color:#777;font-weight:700;white-space:nowrap;">CC</td>
         <td style="padding:3px 0;">${xmlEsc(ccStr)}</td>
       </tr>` : ''}
       <tr>
@@ -858,12 +870,20 @@ export default {
       }
 
       // ── Auth: initiate Microsoft OAuth ─────────────────────────────────────
+      // FIX #4: /auth/login now accepts an optional redirectTo param from
+      // Missive.initiateCallback, which we store alongside the OAuth state so
+      // the callback can redirect back to Missive with the session_id.
       if (path === '/auth/login') {
-        const state     = randomId(32);
-        const sessionId = randomId(32);
+        const state      = randomId(32);
+        const sessionId  = randomId(32);
+        const redirectTo = url.searchParams.get('redirectTo') || '';
 
-        // Store state → sessionId mapping (expires in 10 min)
-        await env.ONENOTE_KV.put(`oauth_state:${state}`, sessionId, { expirationTtl: 600 });
+        // Store state → { sessionId, redirectTo } mapping (expires in 10 min)
+        await env.ONENOTE_KV.put(
+          `oauth_state:${state}`,
+          JSON.stringify({ sessionId, redirectTo }),
+          { expirationTtl: 600 }
+        );
 
         const authUrl = new URL(MS_AUTH_URL);
         authUrl.searchParams.set('client_id',     env.MICROSOFT_CLIENT_ID);
@@ -879,20 +899,32 @@ export default {
 
       // ── Auth: handle OAuth callback ────────────────────────────────────────
       if (path === '/auth/callback') {
-        const code  = url.searchParams.get('code');
-        const state = url.searchParams.get('state');
-        const err   = url.searchParams.get('error');
+        const code    = url.searchParams.get('code');
+        const state   = url.searchParams.get('state');
+        const err     = url.searchParams.get('error');
         const errDesc = url.searchParams.get('error_description') || err;
 
         if (err) {
           return html500(`Microsoft sign-in was cancelled or failed: ${errDesc}`);
         }
 
-        const sessionId = await env.ONENOTE_KV.get(`oauth_state:${state}`);
-        if (!sessionId) {
+        const stateDataRaw = await env.ONENOTE_KV.get(`oauth_state:${state}`);
+        if (!stateDataRaw) {
           return html500('Auth state expired or invalid. Please try again.');
         }
         await env.ONENOTE_KV.delete(`oauth_state:${state}`);
+
+        // FIX #4: Parse the stored state object (was previously just a string)
+        let sessionId, redirectTo;
+        try {
+          const stateData = JSON.parse(stateDataRaw);
+          sessionId  = stateData.sessionId;
+          redirectTo = stateData.redirectTo || '';
+        } catch {
+          // Backwards-compat: old format was a plain sessionId string
+          sessionId  = stateDataRaw;
+          redirectTo = '';
+        }
 
         // Exchange code for tokens
         const tokenRes = await fetch(MS_TOKEN_URL, {
@@ -927,7 +959,14 @@ export default {
           );
         } catch (_) {}
 
-        return htmlPage(renderAuthSuccess(sessionId));
+        // FIX #4: If Missive.initiateCallback provided a redirectTo URL,
+        // redirect back to it with session_id so the iframe receives the token.
+        if (redirectTo) {
+          return renderAuthCallback(redirectTo, sessionId);
+        }
+
+        // Fallback for direct browser visits (no Missive.initiateCallback)
+        return htmlPage(renderAuthSuccessFallback(sessionId));
       }
 
       // ── Auth: disconnect ───────────────────────────────────────────────────
@@ -1066,6 +1105,41 @@ export default {
   },
 };
 
+// ─── HTML: Auth Success Fallback (direct browser visit, no Missive callback) ──
+
+function renderAuthSuccessFallback(sessionId) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Connected!</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0; background: #faf8ff;
+    }
+    .box {
+      text-align: center; padding: 40px;
+      background: #fff; border-radius: 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      max-width: 320px;
+    }
+    .check { font-size: 48px; margin-bottom: 16px; }
+    h2 { color: #7719AA; font-size: 20px; margin-bottom: 8px; }
+    p  { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="check">✓</div>
+    <h2>Connected!</h2>
+    <p>You can close this window and return to Missive.</p>
+  </div>
+</body>
+</html>`;
+}
+
 // ─── Response Helpers ─────────────────────────────────────────────────────────
 
 function corsHeaders(request) {
@@ -1091,9 +1165,13 @@ function htmlPage(content) {
   return new Response(content, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      // Allow embedding in Missive's iframe
-      'X-Frame-Options':         'ALLOWALL',
-      'Content-Security-Policy': "frame-ancestors 'self' https://missiveapp.com https://*.missiveapp.com;",
+      // FIX #1: Removed frame-ancestors from CSP entirely.
+      // Missive on iOS loads from localhost — any explicit frame-ancestors
+      // allowlist (including 'self' + missiveapp.com) blocks the iframe on iOS.
+      // Per Missive docs: "Remove the frame-ancestors directive entirely to
+      // allow loading from localhost."
+      // X-Frame-Options is also removed as it conflicts with CSP on some browsers.
+      'Content-Security-Policy': "default-src 'self' 'unsafe-inline' 'unsafe-eval' https: data:;",
     },
   });
 }

@@ -1,20 +1,19 @@
 name = "missive-onenote"
 main = "src/worker.js"
-compatibility_date = "2024-09-23"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2025-01-01"
 
-# ── KV Namespace ───────────────────────────────────────────────────────────────────────────────
+# ── KV Namespace ──────────────────────────────────────────────────────────────
 # Create with: wrangler kv:namespace create ONENOTE_KV
 # Then paste the returned id below.
 [[kv_namespaces]]
 binding = "ONENOTE_KV"
 id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
-# ── Secrets (set via CLI — never commit these) ────────────────────────────────────
+# ── Secrets (set via CLI — never commit these) ────────────────────────────────
 # wrangler secret put MICROSOFT_CLIENT_ID
 # wrangler secret put MICROSOFT_CLIENT_SECRET
 
-# ── Optional: development overrides ────────────────────────────────────────────
+# ── Optional: development overrides ──────────────────────────────────────────
 [env.development]
 name = "missive-onenote-dev"
 [[env.development.kv_namespaces]]
