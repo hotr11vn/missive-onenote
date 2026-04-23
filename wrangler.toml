@@ -3,11 +3,9 @@ main = "src/worker.js"
 compatibility_date = "2025-01-01"
 
 # ── KV Namespace ──────────────────────────────────────────────────────────────
-# Create with: wrangler kv:namespace create ONENOTE_KV
-# Then paste the returned id below.
 [[kv_namespaces]]
 binding = "ONENOTE_KV"
-id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id      = "3dfe9111340240a4931e62fbc0df8093"
 
 # ── Secrets (set via CLI — never commit these) ────────────────────────────────
 # wrangler secret put MICROSOFT_CLIENT_ID
@@ -18,5 +16,5 @@ id      = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 name = "missive-onenote-dev"
 [[env.development.kv_namespaces]]
 binding    = "ONENOTE_KV"
-id         = "REPLACE_WITH_YOUR_KV_PREVIEW_ID"
-preview_id = "REPLACE_WITH_YOUR_KV_PREVIEW_ID"
+id         = "3dfe9111340240a4931e62fbc0df8093"
+preview_id = "3dfe9111340240a4931e62fbc0df8093"
