@@ -394,16 +394,23 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
     const WORKER_URL = '${workerUrl}';
     const LAST_LOC   = ${JSON.stringify(lastLocation)};
 
-    let sessionId    = null;
-    let currentEmail = null; // { subject, fromName, fromEmail, toFields, ccFields, date, bodyHtml }
-    let notebooks    = [];
-    let sections     = [];
-    let msUserId     = null;
+    let sessionId             = null;
+    let currentEmail          = null; // { subject, fromName, fromEmail, toFields, ccFields, date, bodyHtml }
+    let notebooks             = [];
+    let sections              = [];
+    let msUserId              = null;
+    let currentConversationId = null; // Missive conversation ID currently open
+    // In-memory cache of saved state per conversation: { [convId]: { notebookName, sectionName, pageUrl } }
+    // Also persisted to Missive.storeSet so it survives page reloads.
+    let savedConversations    = {};
 
     // ── Boot ───────────────────────────────────────────────────────────────────
     async function boot() {
       // FIX #4: Use Missive.storeGet instead of sessionStorage for iOS compatibility
       sessionId = await Missive.storeGet('mn_session');
+      // Load persisted per-conversation saved state
+      const stored = await Missive.storeGet('mn_saved_convs');
+      if (stored && typeof stored === 'object') savedConversations = stored;
 
       if (sessionId) {
         // Verify token is still valid
@@ -512,14 +519,30 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
     // ── Missive JS SDK ─────────────────────────────────────────────────────────
     Missive.on('change:conversations', async (ids) => {
       if (!ids || ids.length === 0) {
+        currentConversationId = null;
         currentEmail = null;
         updateEmailPreview();
         updateSaveButton();
+        clearSavedStatus();
         return;
       }
       try {
         const [conv] = await Missive.fetchConversations(ids);
         if (!conv) return;
+
+        const newConvId = conv.id;
+
+        // ── Conversation changed: clear or restore saved status ──────────────
+        if (newConvId !== currentConversationId) {
+          currentConversationId = newConvId;
+          // Check if this conversation was previously saved
+          const savedState = savedConversations[newConvId];
+          if (savedState) {
+            restoreSavedStatus(savedState);
+          } else {
+            clearSavedStatus();
+          }
+        }
 
         // Fetch the latest message for full body
         const msgIds = (conv.messages || []).map(m => m.id).slice(-3); // last 3
@@ -549,6 +572,24 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
         console.error('Missive fetch error:', e);
       }
     });
+
+    // ── Saved-status helpers ───────────────────────────────────────────────────
+    function clearSavedStatus() {
+      document.getElementById('statusArea').innerHTML = '';
+      const linkEl = document.getElementById('openLink');
+      if (linkEl) { linkEl.href = '#'; linkEl.style.display = 'none'; }
+    }
+
+    function restoreSavedStatus(savedState) {
+      showStatus('success',
+        'Saved to <strong>' + esc(savedState.notebookName) + ' / ' + esc(savedState.sectionName) + '</strong>'
+      );
+      const linkEl = document.getElementById('openLink');
+      if (linkEl && savedState.pageUrl) {
+        linkEl.href = savedState.pageUrl;
+        linkEl.style.display = '';
+      }
+    }
 
     function updateEmailPreview() {
       const el = document.getElementById('emailPreview');
@@ -705,6 +746,21 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
         }
         btn.innerHTML = 'Save Email to OneNote';
         btn.disabled = false;
+
+        // ── Persist saved state for this conversation ──────────────────────
+        if (currentConversationId) {
+          savedConversations[currentConversationId] = {
+            notebookName,
+            sectionName,
+            pageUrl: data.pageUrl || null,
+          };
+          // Limit stored entries to last 200 conversations to avoid bloat
+          const keys = Object.keys(savedConversations);
+          if (keys.length > 200) {
+            delete savedConversations[keys[0]];
+          }
+          await Missive.storeSet('mn_saved_convs', savedConversations);
+        }
       } catch(e) {
         showStatus('error', 'Save failed: ' + e.message);
         btn.innerHTML = 'Save Email to OneNote';

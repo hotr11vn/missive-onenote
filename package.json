@@ -4,13 +4,13 @@
   "description": "Missive → OneNote integration: save emails from Missive directly into OneNote via a Cloudflare Worker sidebar app",
   "private": true,
   "scripts": {
-    "dev":    "wrangler dev --local",
+    "dev": "wrangler dev --local",
     "deploy": "wrangler deploy",
     "kv:create": "wrangler kv:namespace create ONENOTE_KV",
-    "logs":   "wrangler tail"
+    "logs": "wrangler tail"
   },
   "devDependencies": {
-    "wrangler": "^3.60.0"
+    "wrangler": "^4.84.1"
   },
   "engines": {
     "node": ">=18.0.0"
