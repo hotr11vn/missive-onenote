@@ -127,9 +127,299 @@ function getSessionId(request) {
   return request.headers.get('X-Session-ID') || null;
 }
 
-// ─── HTML: Sidebar Page ───────────────────────────────────────────────────────
+// ─── HTML: Utility Page (background iframe for quick action) ────────────────────
+// This page is loaded silently by Missive as a utility integration.
+// It calls setAsUtility() so Missive knows to load it in the background,
+// then registers the "Save to OneNote" quick action via setActions().
+// When the action is triggered, it opens an openForm() popup.
 
-function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
+function renderUtilityPage({ workerUrl }) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OneNote Utility</title>
+  <script src="https://integrations.missiveapp.com/missive.js"><\/script>
+</head>
+<body>
+<script>
+(function () {
+  // Tell Missive this is a background utility (no sidebar panel)
+  Missive.setAsUtility();
+
+  // Track current conversation for context
+  let currentConversations = [];
+  let currentSessionId = null;
+
+  // Load session from Missive store
+  Missive.storeGet('mn_session_id').then(function(id) {
+    currentSessionId = id || null;
+  });
+
+  // Keep conversations in sync
+  Missive.on('change:conversations', function(ids, conversations) {
+    currentConversations = conversations || [];
+  });
+
+  // Register the quick action
+  Missive.setActions([{
+    label: 'Save to OneNote',
+    emoji: ':spiral_notepad:',
+    contexts: ['conversation'],
+    callback: function() {
+      handleQuickAction();
+    }
+  }]);
+
+  function handleQuickAction() {
+    // If not connected, open the sidebar so user can connect
+    if (!currentSessionId) {
+      Missive.alert({
+        title: 'OneNote not connected',
+        message: 'Please open the OneNote sidebar panel to connect your Microsoft account first.',
+        note: 'Click the OneNote icon (📓) in the right sidebar panel.'
+      });
+      return;
+    }
+
+    // Fetch notebooks then show picker
+    showNotebookPicker();
+  }
+
+  function showNotebookPicker() {
+    // Show a loading form first
+    Missive.openForm({
+      title: 'Save to OneNote',
+      steps: [{
+        fields: [{
+          type: 'html',
+          content: '<p style="color:#666;font-size:13px;text-align:center;padding:8px 0">Loading notebooks…</p>'
+        }],
+        buttons: [{ label: 'Cancel', type: 'cancel' }]
+      }]
+    });
+
+    // Fetch notebooks
+    fetch('${workerUrl}/api/notebooks', {
+      headers: { 'X-Session-ID': currentSessionId }
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        // Session expired — clear it and ask to reconnect
+        if (data.error.includes('401') || data.error === 'Not authenticated') {
+          Missive.storeSet('mn_session_id', null);
+          currentSessionId = null;
+        }
+        Missive.closeForm();
+        Missive.alert({ title: 'OneNote error', message: data.error });
+        return;
+      }
+
+      var notebooks = (data.value || []);
+      if (!notebooks.length) {
+        Missive.closeForm();
+        Missive.alert({ title: 'No notebooks found', message: 'No OneNote notebooks found in your account.' });
+        return;
+      }
+
+      var notebookOptions = notebooks.map(function(nb) {
+        return { label: nb.displayName, value: nb.id + '|' + nb.displayName };
+      });
+
+      // Load last used notebook
+      Missive.storeGet('mn_last_notebook').then(function(lastNb) {
+        var defaultNb = lastNb || notebookOptions[0].value;
+
+        Missive.openForm({
+          title: 'Save to OneNote',
+          steps: [{
+            fields: [{
+              type: 'select',
+              label: 'Notebook',
+              id: 'notebook',
+              options: notebookOptions,
+              default: defaultNb
+            }],
+            buttons: [
+              { label: 'Cancel', type: 'cancel' },
+              { label: 'Next →', type: 'submit' }
+            ]
+          }],
+          onSubmit: function(data) {
+            var nbVal = data.notebook || defaultNb;
+            var parts = nbVal.split('|');
+            var notebookId = parts[0];
+            var notebookName = parts.slice(1).join('|');
+            Missive.storeSet('mn_last_notebook', nbVal);
+            showSectionPicker(notebookId, notebookName);
+          }
+        });
+      });
+    })
+    .catch(function(err) {
+      Missive.closeForm();
+      Missive.alert({ title: 'Network error', message: err.message });
+    });
+  }
+
+  function showSectionPicker(notebookId, notebookName) {
+    // Show loading
+    Missive.openForm({
+      title: 'Save to OneNote',
+      steps: [{
+        fields: [{
+          type: 'html',
+          content: '<p style="color:#666;font-size:13px;text-align:center;padding:8px 0">Loading sections…</p>'
+        }],
+        buttons: [{ label: 'Cancel', type: 'cancel' }]
+      }]
+    });
+
+    fetch('${workerUrl}/api/sections?notebookId=' + encodeURIComponent(notebookId), {
+      headers: { 'X-Session-ID': currentSessionId }
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        Missive.closeForm();
+        Missive.alert({ title: 'OneNote error', message: data.error });
+        return;
+      }
+
+      var sections = (data.value || []);
+      if (!sections.length) {
+        Missive.closeForm();
+        Missive.alert({ title: 'No sections', message: 'No sections found in "' + notebookName + '". Please create a section in OneNote first.' });
+        return;
+      }
+
+      var sectionOptions = sections.map(function(s) {
+        return { label: s.displayName, value: s.id + '|' + s.displayName };
+      });
+
+      Missive.storeGet('mn_last_section').then(function(lastSec) {
+        var defaultSec = lastSec || sectionOptions[0].value;
+
+        Missive.openForm({
+          title: 'Save to OneNote',
+          steps: [{
+            fields: [
+              {
+                type: 'html',
+                content: '<p style="font-size:12px;color:#888;margin-bottom:4px">Notebook: <strong style="color:#7719AA">' + notebookName + '</strong></p>'
+              },
+              {
+                type: 'select',
+                label: 'Section',
+                id: 'section',
+                options: sectionOptions,
+                default: defaultSec
+              }
+            ],
+            buttons: [
+              { label: 'Cancel', type: 'cancel' },
+              { label: 'Save to OneNote', type: 'submit' }
+            ]
+          }],
+          onSubmit: function(data) {
+            var secVal = data.section || defaultSec;
+            var parts = secVal.split('|');
+            var sectionId = parts[0];
+            var sectionName = parts.slice(1).join('|');
+            Missive.storeSet('mn_last_section', secVal);
+            doSave(notebookId, notebookName, sectionId, sectionName);
+          }
+        });
+      });
+    })
+    .catch(function(err) {
+      Missive.closeForm();
+      Missive.alert({ title: 'Network error', message: err.message });
+    });
+  }
+
+  function doSave(notebookId, notebookName, sectionId, sectionName) {
+    // Show saving indicator
+    Missive.openForm({
+      title: 'Save to OneNote',
+      steps: [{
+        fields: [{
+          type: 'html',
+          content: '<p style="color:#666;font-size:13px;text-align:center;padding:8px 0">Saving to <strong>' + notebookName + ' / ' + sectionName + '</strong>…</p>'
+        }],
+        buttons: []
+      }]
+    });
+
+    // Build email object from current conversation
+    var conv = currentConversations[0];
+    var email = {};
+    if (conv) {
+      email.subject = conv.subject || '(No subject)';
+      var latestMsg = conv.latest_message || {};
+      email.from = (latestMsg.from_field && latestMsg.from_field[0]) ? latestMsg.from_field[0].address : '';
+      email.date = latestMsg.delivered_at ? new Date(latestMsg.delivered_at * 1000).toISOString() : new Date().toISOString();
+      email.body = latestMsg.preview || '';
+    } else {
+      email.subject = 'Saved from Missive';
+      email.from = '';
+      email.date = new Date().toISOString();
+      email.body = '';
+    }
+
+    fetch('${workerUrl}/api/save', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Session-ID': currentSessionId
+      },
+      body: JSON.stringify({
+        sectionId: sectionId,
+        notebookId: notebookId,
+        notebookName: notebookName,
+        sectionName: sectionName,
+        email: email
+      })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(result) {
+      if (result.error) {
+        Missive.closeForm();
+        Missive.alert({ title: 'Save failed', message: result.error });
+        return;
+      }
+
+      var noteLink = result.pageUrl || null;
+      var successHtml = '<div style="text-align:center;padding:8px 0">' +
+        '<p style="color:#27ae60;font-weight:600;font-size:14px;margin-bottom:6px">✅ Saved!</p>' +
+        '<p style="color:#555;font-size:13px">Saved to <strong style="color:#7719AA">' + notebookName + ' / ' + sectionName + '</strong></p>' +
+        (noteLink ? '<p style="margin-top:10px"><a href="' + noteLink + '" target="_blank" style="color:#7719AA;font-size:13px">Open in OneNote ↗</a></p>' : '') +
+        '</div>';
+
+      Missive.openForm({
+        title: 'Save to OneNote',
+        steps: [{
+          fields: [{ type: 'html', content: successHtml }],
+          buttons: [{ label: 'Done', type: 'cancel' }]
+        }]
+      });
+    })
+    .catch(function(err) {
+      Missive.closeForm();
+      Missive.alert({ title: 'Network error', message: err.message });
+    });
+  }
+
+}());
+<\/script>
+</body>
+</html>`;
+}
+
+// ─── HTML: Sidebar Page ─────────────────────────────────────────────
+
+function renderSidebarar({ workerUrl, lastLocation = null, error = '' } = {}) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1340,6 +1630,14 @@ export default {
                  ?? null,
           title:    page.title,
         }, 201, request);
+      }
+
+      // ── Utility page (background iframe for quick action registration) ────────
+      // This page is loaded silently by Missive as a utility integration.
+      // It calls setAsUtility() + setActions() so the quick action appears
+      // in Missive's quick action settings without opening the sidebar.
+      if (path === '/utility') {
+        return htmlPage(renderUtilityPage({ workerUrl }));
       }
 
       // ── Sidebar UI (main app page) ─────────────────────────────────────────
