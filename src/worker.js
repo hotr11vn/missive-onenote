@@ -499,9 +499,9 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
       });
     }
 
-    // ── FIX #2: Quick Action via Missive.setActions ────────────────────────────
-    // This registers the "Save to OneNote" action in Missive's conversation
-    // context menus, making it visible in the quick action configuration.
+    // ── Quick Action: popup-based save via Missive.openForm ──────────────────
+    // Registers a "Save to OneNote" action that opens a GitHub-style popup
+    // with notebook + section pickers and a Save button — no sidebar needed.
     function setupQuickAction() {
       Missive.setActions([
         {
@@ -509,8 +509,207 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
           emoji: ':spiral_notepad:',
           contexts: ['conversation'],
           callback: async ({ conversations }) => {
-            // Open the sidebar so the user can see the save UI
-            Missive.openSelf();
+            // Must be authenticated
+            if (!sessionId) {
+              await Missive.alert({
+                title: 'Not connected',
+                message: 'Please open the OneNote sidebar and connect your Microsoft account first.',
+              });
+              Missive.openSelf();
+              return;
+            }
+
+            // ── Step 1: Load notebooks and show popup ────────────────────────
+            let notebooksData = [];
+            try {
+              const r = await apiFetch('/api/notebooks');
+              if (!r.ok) throw new Error('Could not load notebooks');
+              const d = await r.json();
+              notebooksData = d.value || [];
+            } catch(e) {
+              await Missive.alert({ title: 'Error', message: 'Could not load notebooks: ' + e.message });
+              return;
+            }
+
+            if (!notebooksData.length) {
+              await Missive.alert({ title: 'No notebooks', message: 'No OneNote notebooks found in your account.' });
+              return;
+            }
+
+            // Pre-select last used notebook
+            const defaultNotebook = LAST_LOC?.notebookId
+              ? notebooksData.find(nb => nb.id === LAST_LOC.notebookId)
+              : null;
+
+            const notebookResult = await Missive.openForm({
+              name: 'Save to OneNote',
+              fields: [
+                {
+                  type: 'select',
+                  data: {
+                    name: 'notebookId',
+                    placeholder: 'Select a notebook…',
+                    required: true,
+                    value: defaultNotebook?.id || '',
+                    options: notebooksData.map(nb => ({ label: nb.displayName, value: nb.id })),
+                  },
+                },
+              ],
+              buttons: [
+                { type: 'cancel', label: 'Cancel' },
+                { type: 'submit', label: 'Next →' },
+              ],
+            });
+
+            if (!notebookResult) return; // user cancelled
+
+            const notebookId   = notebookResult.notebookId;
+            const notebookName = notebooksData.find(nb => nb.id === notebookId)?.displayName || notebookId;
+
+            // ── Step 2: Load sections for chosen notebook and show second popup
+            let sectionsData = [];
+            try {
+              const r = await apiFetch('/api/sections?notebookId=' + encodeURIComponent(notebookId));
+              if (!r.ok) throw new Error('Could not load sections');
+              const d = await r.json();
+              sectionsData = d.value || [];
+            } catch(e) {
+              await Missive.alert({ title: 'Error', message: 'Could not load sections: ' + e.message });
+              return;
+            }
+
+            if (!sectionsData.length) {
+              await Missive.alert({ title: 'No sections', message: 'No sections found in "' + notebookName + '".' });
+              return;
+            }
+
+            const defaultSection = LAST_LOC?.sectionId && LAST_LOC?.notebookId === notebookId
+              ? sectionsData.find(s => s.id === LAST_LOC.sectionId)
+              : null;
+
+            const sectionResult = await Missive.openForm({
+              name: 'Save to OneNote',
+              fields: [
+                {
+                  type: 'html',
+                  data: {
+                    name: 'info',
+                    value: '<div style="font-size:12px;color:#666;padding:2px 0 6px;">Notebook: <strong>' + esc(notebookName) + '</strong></div>',
+                  },
+                },
+                {
+                  type: 'select',
+                  data: {
+                    name: 'sectionId',
+                    placeholder: 'Select a section…',
+                    required: true,
+                    value: defaultSection?.id || '',
+                    options: sectionsData.map(s => ({ label: s.displayName, value: s.id })),
+                  },
+                },
+              ],
+              buttons: [
+                { type: 'cancel', label: 'Cancel' },
+                { type: 'submit', label: 'Save to OneNote' },
+              ],
+            });
+
+            if (!sectionResult) return; // user cancelled
+
+            const sectionId   = sectionResult.sectionId;
+            const sectionName = sectionsData.find(s => s.id === sectionId)?.displayName || sectionId;
+
+            // ── Step 3: Fetch conversation email and save ────────────────────
+            // Get the conversation from the quick action payload
+            const conv = conversations && conversations[0];
+            if (!conv) {
+              await Missive.alert({ title: 'Error', message: 'No conversation selected.' });
+              return;
+            }
+
+            // Show saving indicator
+            Missive.openForm({
+              name: 'Save to OneNote',
+              fields: [{
+                type: 'html',
+                data: {
+                  name: 'saving',
+                  value: '<div style="text-align:center;padding:12px 0;color:#7719AA;">Saving to ' + esc(notebookName) + ' / ' + esc(sectionName) + '…</div>',
+                },
+              }],
+              buttons: [],
+              options: { autoClose: false },
+            });
+
+            try {
+              // Fetch full message data
+              const msgIds = (conv.messages || []).map(m => m.id).slice(-3);
+              const msgs   = msgIds.length ? await Missive.fetchMessages(msgIds) : [];
+              const latest = msgs[msgs.length - 1] || {};
+              const thread = msgs.slice(0, -1);
+
+              const emailData = {
+                subject:   conv.subject || latest.subject || '(No subject)',
+                fromName:  latest.from_field?.name  || '',
+                fromEmail: latest.from_field?.address || '',
+                toFields:  latest.to_fields  || [],
+                ccFields:  latest.cc_fields  || [],
+                date:      latest.delivered_at
+                             ? new Date(latest.delivered_at * 1000).toLocaleString()
+                             : new Date().toLocaleString(),
+                bodyHtml:  latest.body || latest.preview || '',
+                thread:    thread.map(m => ({
+                  fromName:  m.from_field?.name || m.from_field?.address || 'Unknown',
+                  date:      m.delivered_at ? new Date(m.delivered_at * 1000).toLocaleString() : '',
+                  bodyHtml:  m.body || m.preview || '',
+                })),
+              };
+
+              const r = await apiFetch('/api/save', {
+                method: 'POST',
+                body: JSON.stringify({ sectionId, notebookId, notebookName, sectionName, email: emailData }),
+              });
+              const data = await r.json();
+              if (!r.ok) throw new Error(data.error || 'Save failed');
+
+              // Close the saving indicator
+              Missive.closeForm();
+
+              // ── Persist saved state for this conversation ────────────────
+              const convId = conv.id;
+              if (convId) {
+                savedConversations[convId] = { notebookName, sectionName, pageUrl: data.pageUrl || null };
+                const keys = Object.keys(savedConversations);
+                if (keys.length > 200) delete savedConversations[keys[0]];
+                await Missive.storeSet('mn_saved_convs', savedConversations);
+                // If this is the currently open conversation, update the sidebar too
+                if (convId === currentConversationId) {
+                  restoreSavedStatus(savedConversations[convId]);
+                }
+              }
+
+              // Show success popup with link
+              await Missive.openForm({
+                name: 'Saved to OneNote ✓',
+                fields: [{
+                  type: 'html',
+                  data: {
+                    name: 'result',
+                    value: '<div style="font-size:13px;color:#1a7f45;padding:4px 0;">' +
+                      'Saved to <strong>' + esc(notebookName) + ' / ' + esc(sectionName) + '</strong>' +
+                      (data.pageUrl
+                        ? '<br><br><a href="' + data.pageUrl + '" style="color:#7719AA;">Open in OneNote ↗</a>'
+                        : '') +
+                      '</div>',
+                  },
+                }],
+                buttons: [{ type: 'cancel', label: 'Close' }],
+              });
+
+            } catch(e) {
+              Missive.closeForm();
+              await Missive.alert({ title: 'Save failed', message: e.message });
+            }
           },
         },
       ]);
