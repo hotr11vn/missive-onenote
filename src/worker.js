@@ -404,8 +404,15 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
     // Also persisted to Missive.storeSet so it survives page reloads.
     let savedConversations    = {};
 
-    // ── Boot ───────────────────────────────────────────────────────────────────
+    // ── Boot ───────────────────────────────────────────────────────────
     async function boot() {
+      // Register quick actions immediately at startup — BEFORE any async work.
+      // setAsUtility() tells Missive to load this iframe in the background even
+      // when the sidebar panel is closed, ensuring setActions() always runs and
+      // the quick action appears in Settings → Preferences → Quick Actions.
+      Missive.setAsUtility();
+      setupQuickAction();
+
       // FIX #4: Use Missive.storeGet instead of sessionStorage for iOS compatibility
       sessionId = await Missive.storeGet('mn_session');
       // Load persisted per-conversation saved state
@@ -421,7 +428,6 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
             msUserId = me.id;
             showApp();
             loadNotebooks();
-            setupQuickAction();
             return;
           }
         } catch(e) {}
@@ -430,7 +436,6 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
         await Missive.storeSet('mn_session', null);
       }
       showConnect();
-      setupQuickAction();
     }
 
     function showConnect() {
@@ -464,7 +469,6 @@ function renderSidebar({ workerUrl, lastLocation = null, error = '' } = {}) {
           }
           showApp();
           loadNotebooks();
-          setupQuickAction();
         } else {
           showStatus('error', 'Authentication failed. Please try again.');
         }
