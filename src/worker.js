@@ -30,8 +30,8 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MS_AUTH_URL   = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
-const MS_TOKEN_URL  = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+const MS_AUTH_URL   = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize';
+const MS_TOKEN_URL  = 'https://login.microsoftonline.com/consumers/oauth2/v2.0/token';
 const GRAPH_BASE    = 'https://graph.microsoft.com/v1.0';
 const MS_SCOPES     = 'Notes.ReadWrite offline_access User.Read';
 
